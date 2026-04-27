@@ -91,19 +91,52 @@ def normalize_font_style(value: str | None) -> str:
     return "normal"
 
 
+def parse_css_classes(root) -> dict[str, dict[str, str]]:
+    """Parse .classname{...} rules from every <style> element and return
+    a map from class name → {property: value}."""
+    css_class_map: dict[str, dict[str, str]] = {}
+    for elem in root.iter():
+        if local_name(elem.tag) == "style":
+            css_text = elem.text or ""
+            for m in re.finditer(r'\.([a-zA-Z_][\w-]*)\s*\{([^}]*)\}', css_text):
+                cls = m.group(1)
+                decls = parse_style_declarations(m.group(2))
+                # Merge — later rules override earlier ones for the same class
+                css_class_map.setdefault(cls, {}).update(decls)
+    return css_class_map
+
+
 def resolve_font_usage(
     elem,
     inherited: dict[str, str],
+    css_class_map: dict[str, dict[str, str]],
 ) -> dict[str, str]:
+    # 1. Start from inherited values
+    family = inherited["family"]
+    weight = inherited["weight"]
+    style  = inherited["style"]
+
+    # 2. Apply class-based CSS rules (in document order of class list)
+    if elem.get("class"):
+        for cls in elem.get("class").split():
+            cls_decls = css_class_map.get(cls, {})
+            if "font-family" in cls_decls:
+                family = cls_decls["font-family"]
+            if "font-weight" in cls_decls:
+                weight = cls_decls["font-weight"]
+            if "font-style" in cls_decls:
+                style = cls_decls["font-style"]
+
+    # 3. Direct XML presentation attributes override classes
+    family = elem.get("font-family", family)
+    weight = elem.get("font-weight", weight)
+    style  = elem.get("font-style",  style)
+
+    # 4. Inline style= attribute has highest priority
     declarations = parse_style_declarations(elem.get("style"))
-
-    family = elem.get("font-family", inherited["family"])
-    weight = elem.get("font-weight", inherited["weight"])
-    style = elem.get("font-style", inherited["style"])
-
     family = declarations.get("font-family", family)
     weight = declarations.get("font-weight", weight)
-    style = declarations.get("font-style", style)
+    style  = declarations.get("font-style",  style)
 
     return {
         "family": normalize_font_family(family),
@@ -128,11 +161,12 @@ def add_text_chars(
 
 def collect_text_usage(root) -> dict[tuple[str, str, str], set[str]]:
     """Return characters used by each concrete (family, weight, style) text run."""
+    css_class_map = parse_css_classes(root)
     usage: dict[tuple[str, str, str], set[str]] = defaultdict(set)
     text_tags = {"text", "tspan", "textPath"}
 
     def visit(elem, inherited: dict[str, str], in_text_context: bool) -> None:
-        current = resolve_font_usage(elem, inherited)
+        current = resolve_font_usage(elem, inherited, css_class_map)
         current_in_text = in_text_context or local_name(elem.tag) in text_tags
         current_key = (current["family"], current["weight"], current["style"])
 
